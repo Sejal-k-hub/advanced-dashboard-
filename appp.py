@@ -1,7 +1,5 @@
 import gc
-import glob
 import io
-import os
 import re
 import matplotlib
 matplotlib.use("Agg")
@@ -22,17 +20,19 @@ if "l2g" not in st.session_state: st.session_state.l2g = {}
 # ── sidebar ───────────────────────────────────────────────────────────────────
 st.sidebar.title("⚙️ Settings")
 
-st.sidebar.markdown("### 📁 Step 1 — Paste your folder path")
-vcf_folder = st.sidebar.text_input(
-    "Folder containing VCF files",
-    placeholder="/home/insilico/mutation_dashboard",
-    help="Type the full path to the folder where your .vcf files are stored"
+st.sidebar.markdown("### 📁 Step 1 — Upload VCF files")
+vcf_files = st.sidebar.file_uploader(
+    "Upload one or more .vcf files",
+    type=["vcf"],
+    accept_multiple_files=True,
+    help="Select all your annotated .vcf files (SnpEff ANN= format)"
 )
 
 st.sidebar.markdown("### 📄 Step 2 — GFF file (optional)")
-gff_path = st.sidebar.text_input(
-    "Full path to GFF file",
-    placeholder="/home/insilico/mutation_dashboard/genome.gff"
+gff_file = st.sidebar.file_uploader(
+    "Upload GFF/GFF3 file",
+    type=["gff", "gff3", "txt"],
+    accept_multiple_files=False,
 )
 
 st.sidebar.markdown("### ⚡ Step 3 — Mode")
@@ -46,61 +46,60 @@ st.sidebar.markdown("### 🔍 Filters")
 gene_q = st.sidebar.text_input("Gene name", placeholder="e.g. mgrB")
 mut_q  = st.sidebar.text_input("Protein change", placeholder="e.g. p.Tyr")
 
-# ── GFF parser ────────────────────────────────────────────────────────────────
-@st.cache_data(show_spinner=False)
-def parse_gff(path: str) -> dict:
+# ── GFF parser (from uploaded file object) ────────────────────────────────────
+def parse_gff(file_obj) -> dict:
     out = {}
-    if not path or not os.path.isfile(path):
+    if file_obj is None:
         return out
-    with open(path, "r", encoding="utf-8", errors="replace") as fh:
-        for line in fh:
-            line = line.strip()
-            if not line or line.startswith("#"): continue
-            cols = line.split("\t")
-            if len(cols) < 9: continue
-            attrs = {}
-            for seg in cols[8].split(";"):
-                if "=" not in seg: continue
-                k, _, v = seg.partition("=")
-                attrs[k.strip()] = v.strip().replace("%20", " ")
-            lt = attrs.get("locus_tag", "")
-            if lt:
-                out[lt] = attrs.get("gene") or attrs.get("Name") or lt
+    content = file_obj.read().decode("utf-8", errors="replace")
+    for line in content.splitlines():
+        line = line.strip()
+        if not line or line.startswith("#"): continue
+        cols = line.split("\t")
+        if len(cols) < 9: continue
+        attrs = {}
+        for seg in cols[8].split(";"):
+            if "=" not in seg: continue
+            k, _, v = seg.partition("=")
+            attrs[k.strip()] = v.strip().replace("%20", " ")
+        lt = attrs.get("locus_tag", "")
+        if lt:
+            out[lt] = attrs.get("gene") or attrs.get("Name") or lt
     return out
 
-# ── VCF parser (true disk streaming) ─────────────────────────────────────────
-def parse_vcf(path: str, sample: str, fast: bool, l2g: dict) -> pd.DataFrame:
+# ── VCF parser (from uploaded file object) ────────────────────────────────────
+def parse_vcf(file_obj, sample: str, fast: bool, l2g: dict) -> pd.DataFrame:
     keep = {"HIGH","MODERATE"} if fast else {"HIGH","MODERATE","LOW","MODIFIER"}
     rows = []
-    with open(path, "r", encoding="utf-8", errors="replace") as fh:
-        for raw in fh:
-            raw = raw.rstrip()
-            if not raw or raw[0]=="#" or "ANN=" not in raw: continue
-            cols = raw.split("\t")
-            if len(cols) < 8: continue
-            chrom,pos,_,ref,alt,qual,_,info = cols[:8]
-            m = re.search(r"(?:^|;)ANN=([^;]+)", info)
-            if not m: continue
-            try:    pv = int(pos)
-            except: pv = 0
-            try:    qv = float(qual)
-            except: qv = 0.0
-            for entry in m.group(1).split(","):
-                p = entry.split("|")
-                if len(p) < 4: continue
-                impact = p[2].strip() if len(p)>2 else ""
-                if impact and impact not in keep: continue
-                def g(i): return p[i].strip() if len(p)>i else ""
-                gene = g(3)
-                if gene and l2g: gene = l2g.get(gene, gene)
-                rows.append({
-                    "Sample":  sample,
-                    "Gene":    gene   or None,
-                    "Effect":  g(1)   or None,
-                    "Impact":  impact or None,
-                    "Protein": g(10)  or None,
-                    "POS": pv, "REF": ref, "ALT": alt, "QUAL": qv,
-                })
+    content = file_obj.read().decode("utf-8", errors="replace")
+    for raw in content.splitlines():
+        raw = raw.rstrip()
+        if not raw or raw[0]=="#" or "ANN=" not in raw: continue
+        cols = raw.split("\t")
+        if len(cols) < 8: continue
+        chrom,pos,_,ref,alt,qual,_,info = cols[:8]
+        m = re.search(r"(?:^|;)ANN=([^;]+)", info)
+        if not m: continue
+        try:    pv = int(pos)
+        except: pv = 0
+        try:    qv = float(qual)
+        except: qv = 0.0
+        for entry in m.group(1).split(","):
+            p = entry.split("|")
+            if len(p) < 4: continue
+            impact = p[2].strip() if len(p)>2 else ""
+            if impact and impact not in keep: continue
+            def g(i): return p[i].strip() if len(p)>i else ""
+            gene = g(3)
+            if gene and l2g: gene = l2g.get(gene, gene)
+            rows.append({
+                "Sample":  sample,
+                "Gene":    gene   or None,
+                "Effect":  g(1)   or None,
+                "Impact":  impact or None,
+                "Protein": g(10)  or None,
+                "POS": pv, "REF": ref, "ALT": alt, "QUAL": qv,
+            })
     if not rows: return pd.DataFrame()
     df = pd.DataFrame(rows)
     del rows; gc.collect()
@@ -111,69 +110,50 @@ def parse_vcf(path: str, sample: str, fast: bool, l2g: dict) -> pd.DataFrame:
     return df
 
 # ── landing ───────────────────────────────────────────────────────────────────
-if not vcf_folder.strip():
+if not vcf_files:
     st.markdown("""
     ## 👋 Welcome! Follow these 4 steps in the sidebar:
 
-    **Step 1** — Paste your VCF folder path, e.g.
-    ```
-    /home/insilico/mutation_dashboard
-    ```
-    **Step 2** — Paste your GFF file path (optional), e.g.
-    ```
-    /home/insilico/mutation_dashboard/genome.gff
-    ```
-    **Step 3** — Keep **Fast Mode ON**
+    **Step 1** — Upload your `.vcf` files (SnpEff annotated, with `ANN=` fields)
+
+    **Step 2** — Upload your GFF file (optional, for gene name mapping)
+
+    **Step 3** — Keep **Fast Mode ON** for faster loading
 
     **Step 4** — Click **LOAD FILES**
 
     ---
-    > 💡 **Why no file upload?**
-    > Your VCF files are 35 MB each. Browsers refuse to upload files
-    > that large through a web interface (AxiosError: Network Error).
-    > Reading directly from your hard drive bypasses this completely
-    > and is also 10× faster.
+    > 💡 Files are processed entirely in the browser session and never stored permanently.
     """)
     st.stop()
 
-# ── find vcf files ────────────────────────────────────────────────────────────
-vcf_paths = sorted(glob.glob(os.path.join(vcf_folder.strip(), "*.vcf")))
-if not vcf_paths:
-    st.error(f"No .vcf files found in:  `{vcf_folder}`\n\nCheck the path is correct.")
-    st.stop()
-
-st.sidebar.success(f"✅ Found {len(vcf_paths)} VCF files")
-
-# ── cache key (file path + size + mtime) ─────────────────────────────────────
-def make_key(paths, fast):
-    parts = []
-    for p in paths:
-        try:    parts.append(f"{p}:{os.path.getsize(p)}:{int(os.path.getmtime(p))}")
-        except: parts.append(p)
+# ── cache key ─────────────────────────────────────────────────────────────────
+def make_key(files, fast):
+    parts = [f"{f.name}:{f.size}" for f in files]
     parts.append("fast" if fast else "full")
     return "|".join(parts)
 
-new_key   = make_key(vcf_paths, fast_mode)
+new_key   = make_key(vcf_files, fast_mode)
 need_load = load_btn or new_key != st.session_state.key or st.session_state.df is None
 
 # ── parse ─────────────────────────────────────────────────────────────────────
 if need_load:
     l2g = {}
-    if gff_path.strip():
+    if gff_file is not None:
         with st.spinner("Loading GFF…"):
-            l2g = parse_gff(gff_path.strip())
+            l2g = parse_gff(gff_file)
         st.session_state.l2g = l2g
         st.sidebar.success(f"GFF: {len(l2g):,} genes mapped")
 
     l2g    = st.session_state.l2g
     bar    = st.progress(0, text="Starting…")
     frames = []
-    n      = len(vcf_paths)
+    n      = len(vcf_files)
 
-    for i, path in enumerate(vcf_paths):
-        sample = os.path.basename(path).split(".")[0]
+    for i, f in enumerate(vcf_files):
+        sample = f.name.split(".")[0]
         bar.progress((i+1)/n, text=f"{sample}  ({i+1}/{n})")
-        df_one = parse_vcf(path, sample, fast_mode, l2g)
+        df_one = parse_vcf(f, sample, fast_mode, l2g)
         if not df_one.empty:
             frames.append(df_one)
         del df_one; gc.collect()
